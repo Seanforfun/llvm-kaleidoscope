@@ -3,4 +3,6 @@ project(Kaleidoscope)
 
 set(CMAKE_CXX_STANDARD 11)
 
-add_executable(Kaleidoscope main.cpp toy.cpp)
+include_directories(include)
+
+add_executable(Kaleidoscope main.cpp)

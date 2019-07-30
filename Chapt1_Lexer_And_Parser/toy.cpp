@@ -8,7 +8,20 @@
 #include <map>
 #include <iostream>
 
-#include "include/llvm/ADT/STLExtras.h"
+#include "../include/llvm/ADT/STLExtras.h"
+
+class LexerParseException: public std::exception{
+private:
+    std::string msg;
+public:
+    explicit LexerParseException(const std::string& msg){
+        this->msg = "Lexer Exception: " + msg;
+    }
+
+    const char* what() const noexcept override {
+        return this->msg.c_str();
+    }
+};
 
 enum Token{
     TOKEN_EOF = -1,
@@ -45,9 +58,14 @@ static int getToken(){
     }
 
     if(isdigit(lastCharacter) || lastCharacter == '.'){
+        int dotCount = 0;
+        if(lastCharacter == '.') ++dotCount;
         std::string numStr;
         numStr += lastCharacter;
         while(isdigit(lastCharacter = getchar()) || lastCharacter == '.'){
+            if(lastCharacter == '.' && dotCount){
+                throw LexerParseException("Incorrect format for numerical value, mutliple '.'");
+            }
             numStr += lastCharacter;
         }
         numVal = strtod(numStr.c_str(), nullptr);
@@ -115,11 +133,11 @@ namespace {
 
     class ProtoTypeAST{
         std::string name;
-        std::vector<std::unique_ptr<ExprAST>> args;
+        std::vector<std::string> args;
 
     public:
         ProtoTypeAST(const std::string &name,
-                const std::vector<std::unique_ptr<ExprAST>> &args) : name(name), args(std::move(args)) {}
+                const std::vector<std::string> &args) : name(name), args(std::move(args)) {}
     };
 
     class FunctionAST{
@@ -216,3 +234,113 @@ static std::unique_ptr<ExprAST> parsePrimary(){
 //===----------------------------------------------------
 // binary expression parsing
 //===----------------------------------------------------
+static std::unique_ptr<ExprAST> parseBinaryOpExpressionRHS(int, std::unique_ptr<ExprAST>);
+
+static std::unique_ptr<ExprAST> parseExpression(){
+    std::unique_ptr<ExprAST> LHS = parsePrimary();
+    if(!LHS) return nullptr;
+
+    return parseBinaryOpExpressionRHS(0, LHS);
+}
+
+/**
+ *  Create a binary operation AST.
+ * @param opPrec    precedence of previous operator.
+ * @param LHS  LHS AST of current binary operation
+ * @return  BinaryOpExprAST pointer.
+ */
+static std::unique_ptr<ExprAST> parseBinaryOpExpressionRHS(int opPrec, std::unique_ptr<ExprAST> LHS){
+    while (1){
+        int curPrec = getTokenPrecedence(); // precedence of current operator.
+
+        if(curPrec < opPrec) return LHS;    // This is the end of the expression. Current token is not an operator.
+
+        int curOp = curToken;
+        getNextToken(); // skip current operator.
+
+        std::unique_ptr<ExprAST> RHS = parsePrimary();
+        if(!RHS) return nullptr;
+
+        int nextPrec = getTokenPrecedence();
+        if(curPrec < nextPrec){
+            RHS = parseBinaryOpExpressionRHS(curPrec + 1, std::move(RHS));
+            if(RHS) return nullptr;
+        }
+
+        LHS = llvm::make_unique<BinaryExprAST>(curOp, std::move(LHS), std::move(RHS));
+    }
+}
+
+static std::unique_ptr<ProtoTypeAST> parsePrototype(){
+    if(curToken != TOKEN_IDENTIFIER) return logErrorP("Expect a function name in prototype");
+    std::string functionName = identifierStr;
+    getNextToken();
+
+    if(curToken != '(') return logErrorP("Expect '(' in prototype");
+    std::vector<std::unique_ptr<ExprAST>> args;
+    while((cur = getNextToken()) == TOKEN_IDENTIFIER){
+        args.push_back(identifierStr);
+        getNextToken();
+    }
+    if(curToken != ')') return logErrorP("Expect ')' matching '('");
+    getNextToken();
+    return llvm::make_unique<ProtoTypeAST>(functionName, std::move(args));
+}
+
+static std::unique_ptr<FunctionAST> parseDefinition(){
+    getNextToken(); //skip token 'def'
+
+    auto proto = parsePrototype();
+    if(!proto) return nullptr;
+
+    auto body = parseExpression();
+    return llvm::make_unique<FunctionAST>(std::move(proto), std::move(body));
+}
+
+static std::unique_ptr<ProtoTypeAST> parseExtern(){
+    getNextToken(); // skip "extern"
+    return parsePrototype();
+}
+
+static std::unique_ptr<FunctionAST> parseTopLevel(){
+    if(auto body = parseExpression()){
+        auto proto = llvm::make_unique<ProtoTypeAST>("", std::vector<std::string> v);
+        return llvm::make_unique<FunctionAST>(std::move(proto), std::move(body));
+    }
+    return nullptr;
+}
+
+static void definitionHandler(){
+    if(parseDefinition()){
+        fprintf(stderr, "Parsed a function definition.\n")
+    }else getNextToken();
+}
+
+static void externHandler(){
+    if(parseExtern()) fprintf(stderr, "Parsed a extern.\n")
+    else getNextToken();
+}
+
+static void topLevelHandler(){
+    if(parseTopLevel()) fprintf(stderr, "Parsed a top-level expression.\n")
+}
+
+static void MainLoop(){
+    fprintf(stderr, "Ready> ");
+    while(1){
+        switch (curToken){
+            case TOKEN_EOF: return;
+            case TOKEN_DEF:
+                definitionHandler();
+                break;
+            case TOKEN_EXT:
+                externHandler();
+                break;
+            case ';':
+                getNextToken();
+            default:
+                topLevelHandler();
+                break;
+        }
+    }
+}
