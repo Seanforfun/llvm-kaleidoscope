@@ -138,7 +138,7 @@ namespace {
 
     public:
         ProtoTypeAST(const std::string &name,
-                const std::vector<std::string> &args) : name(name), args(std::move(args)) {}
+                std::vector<std::string> args) : name(name), args(std::move(args)) {}
     };
 
     class FunctionAST{
