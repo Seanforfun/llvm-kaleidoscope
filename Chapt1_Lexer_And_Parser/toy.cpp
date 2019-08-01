@@ -8,7 +8,7 @@
 #include <map>
 #include <iostream>
 
-#include "../include/llvm/ADT/STLExtras.h"
+#include "llvm/ADT/STLExtras.h"
 
 class LexerParseException: public std::exception{
 private:
@@ -44,6 +44,7 @@ static double numVal; // if current token is a number, this variable holds the v
  */
 static int getToken(){
     static int lastCharacter = ' ';
+
     while(isspace(lastCharacter))
         lastCharacter = getchar();
 
@@ -116,8 +117,8 @@ namespace {
         std::unique_ptr<ExprAST> LHS, RHS;
 
     public:
-        BinaryExprAST(char op, std::unique_ptr<ExprAST> &lhs,
-                std::unique_ptr<ExprAST> &rhs) :
+        BinaryExprAST(char op, std::unique_ptr<ExprAST> lhs,
+                std::unique_ptr<ExprAST> rhs) :
                 Op(op), LHS(std::move(lhs)), RHS(std::move(rhs)) {}
     };
 
@@ -127,8 +128,8 @@ namespace {
         std::vector<std::unique_ptr<ExprAST>> args;
 
     public:
-        CallExprAST(const std::string &callee,
-                const std::vector<std::unique_ptr<ExprAST>> &args) : callee(callee), args(std::move(args)) {}
+        CallExprAST(const std::string callee,
+                std::vector<std::unique_ptr<ExprAST>> args) : callee(callee), args(std::move(args)) {}
     };
 
     class ProtoTypeAST{
@@ -144,7 +145,7 @@ namespace {
         std::unique_ptr<ProtoTypeAST> prototype;
         std::unique_ptr<ExprAST> body;
     public:
-        FunctionAST(std::unique_ptr<ProtoTypeAST> &prototype, std::unique_ptr<ExprAST> &body) :
+        FunctionAST(std::unique_ptr<ProtoTypeAST> prototype, std::unique_ptr<ExprAST> body) :
         prototype(std::move(prototype)), body(std::move(body)) {}
     };
 }
@@ -154,7 +155,8 @@ namespace {
 //===-----------------------------------------------------------
 static int curToken;
 static int getNextToken(){
-    return curToken = getToken();
+    curToken = getToken();
+    return curToken;
 }
 
 std::map<char, int> binopPrecedence; // +, -, *, <
@@ -167,7 +169,7 @@ static int getTokenPrecedence(){
 }
 
 std::unique_ptr<ExprAST> logError(const std::string msg){
-    std::cerr << "Error: " << msg << std::endl;
+    fprintf(stderr, "Error: %s\n", msg.c_str());
     return nullptr;
 }
 
@@ -199,14 +201,16 @@ static std::unique_ptr<ExprAST> parseIdentifierExpr(){
 
     getNextToken(); // move to next token
 
-    if(curToken != '(') return llvm::make_unique<VariableExprAST>(idName);  // a = b
+    // just an identifier, like a b
+    if(curToken != '(') return llvm::make_unique<VariableExprAST>(idName);
 
+    // enter the bracket parse
     getNextToken();
     std::vector<std::unique_ptr<ExprAST>> args;
     if(curToken != ')'){ //a = (b)
         while (1){
             if(auto arg = parseExpression()){
-                args.push_back(arg);
+                args.push_back(std::move(arg));
             }else return nullptr;
 
             if(curToken == ')') break;
@@ -215,7 +219,7 @@ static std::unique_ptr<ExprAST> parseIdentifierExpr(){
         }
     }
     getNextToken();
-    return llvm::make_unique<CallExprAST>(idName, args);
+    return llvm::make_unique<CallExprAST>(idName, std::move(args));
 }
 
 static std::unique_ptr<ExprAST> parsePrimary(){
@@ -236,11 +240,15 @@ static std::unique_ptr<ExprAST> parsePrimary(){
 //===----------------------------------------------------
 static std::unique_ptr<ExprAST> parseBinaryOpExpressionRHS(int, std::unique_ptr<ExprAST>);
 
+/**
+ * Parse costumized expressions
+ * @return
+ */
 static std::unique_ptr<ExprAST> parseExpression(){
     std::unique_ptr<ExprAST> LHS = parsePrimary();
     if(!LHS) return nullptr;
 
-    return parseBinaryOpExpressionRHS(0, LHS);
+    return parseBinaryOpExpressionRHS(0, std::move(LHS));
 }
 
 /**
@@ -277,10 +285,11 @@ static std::unique_ptr<ProtoTypeAST> parsePrototype(){
     getNextToken();
 
     if(curToken != '(') return logErrorP("Expect '(' in prototype");
-    std::vector<std::unique_ptr<ExprAST>> args;
-    while((cur = getNextToken()) == TOKEN_IDENTIFIER){
+    std::vector<std::string> args;
+    int cur  = getNextToken();
+    while(cur == TOKEN_IDENTIFIER){
         args.push_back(identifierStr);
-        getNextToken();
+        cur = getNextToken();
     }
     if(curToken != ')') return logErrorP("Expect ')' matching '('");
     getNextToken();
@@ -304,7 +313,8 @@ static std::unique_ptr<ProtoTypeAST> parseExtern(){
 
 static std::unique_ptr<FunctionAST> parseTopLevel(){
     if(auto body = parseExpression()){
-        auto proto = llvm::make_unique<ProtoTypeAST>("", std::vector<std::string> v);
+        std::vector<std::string> v;
+        auto proto = llvm::make_unique<ProtoTypeAST>("", std::move(v));
         return llvm::make_unique<FunctionAST>(std::move(proto), std::move(body));
     }
     return nullptr;
@@ -312,22 +322,28 @@ static std::unique_ptr<FunctionAST> parseTopLevel(){
 
 static void definitionHandler(){
     if(parseDefinition()){
-        fprintf(stderr, "Parsed a function definition.\n")
-    }else getNextToken();
+        fprintf(stderr, "Parsed a function definition.\n");
+    }else if(curToken == ';') return;
+    else getNextToken();
 }
 
 static void externHandler(){
-    if(parseExtern()) fprintf(stderr, "Parsed a extern.\n")
+    if(parseExtern()){
+        fprintf(stderr, "Parsed a extern.\n");
+    }else if(curToken == ';') return;
     else getNextToken();
 }
 
 static void topLevelHandler(){
-    if(parseTopLevel()) fprintf(stderr, "Parsed a top-level expression.\n")
+    if(parseTopLevel())
+        fprintf(stderr, "Parsed a top-level expression.\n");
+    else getNextToken();
 }
 
 static void MainLoop(){
-    fprintf(stderr, "Ready> ");
     while(1){
+        fprintf(stderr, "Ready> ");
+        getNextToken();
         switch (curToken){
             case TOKEN_EOF: return;
             case TOKEN_DEF:
@@ -337,10 +353,20 @@ static void MainLoop(){
                 externHandler();
                 break;
             case ';':
-                getNextToken();
+                continue;
             default:
                 topLevelHandler();
                 break;
         }
     }
+}
+
+int main(){
+    binopPrecedence['<'] = 10;
+    binopPrecedence['+'] = 20;
+    binopPrecedence['-'] = 20;
+    binopPrecedence['*'] = 40;
+    std::cout << "Start> " << std::endl;
+    MainLoop();
+    return 0;
 }
