@@ -15,6 +15,8 @@ message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 # you will need to enable C++11 support
 # for your compiler.
 
+add_compile_options(-std=c++11)
+
 #include_directories("libs")
 add_definitions(${LLVM_DEFINITIONS})
 
