@@ -295,7 +295,7 @@ Only tokens cannot represent the grammar or higher level meaning of the program.
             int nextPrec = getTokenPrecedence();   
             if(curPrec < nextPrec){
                 RHS = parseBinaryOpExpressionRHS(curPrec + 1, std::move(RHS));
-                if(RHS) return nullptr;
+                if(!RHS) return nullptr;
             }
             
            // next operator has same or lower precedence to current one, go to the while loop again.

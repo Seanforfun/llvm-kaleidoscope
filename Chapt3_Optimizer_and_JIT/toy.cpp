@@ -11,6 +11,7 @@
 #include <cstdlib>
 
 
+#include "../include/KaleidoscopeJIT.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/Value.h"
 #include "llvm/IR/IRBuilder.h"
@@ -19,11 +20,23 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Verifier.h"
+#include "llvm/IR/LegacyPassManager.h"
+#include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Scalar.h"
+#include "llvm/Transforms/Scalar/GVN.h"
+#include "llvm/Support/TargetSelect.h"
+
+void initializeModuleAndFPM();
+
+class ProtoTypeAST;
 
 static llvm::LLVMContext llvmContext;
 static llvm::IRBuilder<> builder(llvmContext);
 static std::unique_ptr<llvm::Module> theModules;
 static std::map<std::string, llvm::Value*> nameValueTbl;
+static std::unique_ptr<llvm::legacy::FunctionPassManager> theFPM;
+static std::unique_ptr<llvm::orc::KaleidoscopeJIT> theJIT;
+static std::map<std::string, std::unique_ptr<ProtoTypeAST>> functionProto;
 
 class LexerParseException: public std::exception{
 private:
@@ -80,7 +93,8 @@ static int getToken(){
         numStr += lastCharacter;
         while(isdigit(lastCharacter = getchar()) || lastCharacter == '.'){
             if(lastCharacter == '.' && dotCount){
-                throw LexerParseException("Incorrect format for numerical value, mutliple '.'");
+                fprintf(stderr, "Incorrect format for numerical value, mutliple '.'\n");
+//                throw LexerParseException("Incorrect format for numerical value, mutliple '.'");
             }
             numStr += lastCharacter;
         }
@@ -106,84 +120,81 @@ static int getToken(){
 //===-----------------------------------------------
 // Abstract syntax tree
 //===-----------------------------------------------
-namespace {
-    class ExprAST{
-    public:
-        virtual ~ExprAST() = default;
+class ExprAST{
+public:
+    virtual ~ExprAST() = default;
 
-        virtual llvm::Value* codeGen() = 0;
-    };
+    virtual llvm::Value* codeGen() = 0;
+};
 
-    class NumberExprAST: public ExprAST{
-        double val;
+class NumberExprAST: public ExprAST{
+    double val;
 
-    public:
-        NumberExprAST(double val): val(val) {}
+public:
+    NumberExprAST(double val): val(val) {}
 
-        llvm::Value* codeGen() override;
-    };
+    llvm::Value* codeGen() override;
+};
 
-    // class for variable like 'a'
-    class VariableExprAST: public ExprAST{
-        std::string variable;
+// class for variable like 'a'
+class VariableExprAST: public ExprAST{
+    std::string variable;
 
-    public:
-        VariableExprAST(std::string  variable): variable(std::move(variable)){}
+public:
+    VariableExprAST(std::string  variable): variable(std::move(variable)){}
 
-        llvm::Value* codeGen() override;
-    };
+    llvm::Value* codeGen() override;
+};
 
-    class BinaryExprAST: public ExprAST{
-        char Op;
-        std::unique_ptr<ExprAST> LHS, RHS;
+class BinaryExprAST: public ExprAST{
+    char Op;
+    std::unique_ptr<ExprAST> LHS, RHS;
 
-    public:
-        BinaryExprAST(char op, std::unique_ptr<ExprAST> lhs,
-                      std::unique_ptr<ExprAST> rhs) :
-                Op(op), LHS(std::move(lhs)), RHS(std::move(rhs)) {}
+public:
+    BinaryExprAST(char op, std::unique_ptr<ExprAST> lhs,
+                  std::unique_ptr<ExprAST> rhs) :
+            Op(op), LHS(std::move(lhs)), RHS(std::move(rhs)) {}
 
-        llvm::Value* codeGen() override;
-    };
+    llvm::Value* codeGen() override;
+};
 
-    // class for function call
-    class CallExprAST: public ExprAST{
-        std::string callee; // function name;
-        std::vector<std::unique_ptr<ExprAST>> args;
+// class for function call
+class CallExprAST: public ExprAST{
+    std::string callee; // function name;
+    std::vector<std::unique_ptr<ExprAST>> args;
 
-    public:
-        CallExprAST(std::string callee,
-                    std::vector<std::unique_ptr<ExprAST>> args) : callee(std::move(callee)), args(std::move(args)) {}
+public:
+    CallExprAST(std::string callee,
+                std::vector<std::unique_ptr<ExprAST>> args) : callee(std::move(callee)), args(std::move(args)) {}
 
-        llvm::Value* codeGen()override;
-    };
+    llvm::Value* codeGen()override;
+};
 
-    class ProtoTypeAST{
-    private:
-        std::string name;
-        std::vector<std::string> args;
+class ProtoTypeAST{
+private:
+    std::string name;
+    std::vector<std::string> args;
 
-    public:
-        ProtoTypeAST(std::string name,
-                     std::vector<std::string> args) : name(std::move(name)), args(std::move(args)) {}
+public:
+    ProtoTypeAST(std::string name,
+                 std::vector<std::string> args) : name(std::move(name)), args(std::move(args)) {}
 
-        llvm::Function* codeGen();
+    llvm::Function* codeGen();
 
-        const std::string& getName() const {
-            return name;
-        }
-    };
+    const std::string& getName() const {
+        return name;
+    }
+};
 
-    class FunctionAST{
-        std::unique_ptr<ProtoTypeAST> prototype;
-        std::unique_ptr<ExprAST> body;
-    public:
-        FunctionAST(std::unique_ptr<ProtoTypeAST> prototype, std::unique_ptr<ExprAST> body) :
-                prototype(std::move(prototype)), body(std::move(body)) {}
+class FunctionAST{
+    std::unique_ptr<ProtoTypeAST> prototype;
+    std::unique_ptr<ExprAST> body;
+public:
+    FunctionAST(std::unique_ptr<ProtoTypeAST> prototype, std::unique_ptr<ExprAST> body) :
+            prototype(std::move(prototype)), body(std::move(body)) {}
 
-        llvm::Function* codeGen();
-    };
-
-}
+    llvm::Function* codeGen();
+};
 
 //===---------------------------------------------------------------
 // Log module
@@ -357,7 +368,7 @@ static std::unique_ptr<ProtoTypeAST> parseExtern(){
 static std::unique_ptr<FunctionAST> parseTopLevel(){
     if(auto body = parseExpression()){
         std::vector<std::string> v;
-        auto proto = llvm::make_unique<ProtoTypeAST>("", std::move(v));
+        auto proto = llvm::make_unique<ProtoTypeAST>("__anon_expr", std::move(v));
         return llvm::make_unique<FunctionAST>(std::move(proto), std::move(body));
     }
     return nullptr;
@@ -365,11 +376,12 @@ static std::unique_ptr<FunctionAST> parseTopLevel(){
 
 static void definitionHandler(){
     if(auto pdef = parseDefinition()){
-        // TODO
         if(auto* ir = pdef->codeGen()){
             fprintf(stderr, "Parsed a function definition.\n");
             ir->print(llvm::errs());
             fprintf(stderr, "\n");
+            theJIT->addModule(std::move(theModules));
+            initializeModuleAndFPM();
         }
     }else if(curToken == ';') return;
     else getNextToken();
@@ -381,6 +393,7 @@ static void externHandler(){
             fprintf(stderr, "Parsed a extern.\n");
             ir->print(llvm::errs());
             fprintf(stderr, "\n");
+            functionProto[pExtern->getName()] = std::move(pExtern);
         }
     }else if(curToken == ';') return;
     else getNextToken();
@@ -389,17 +402,59 @@ static void externHandler(){
 static void topLevelHandler(){
     if(auto pTop = parseTopLevel()) {
         if (auto* ir = pTop->codeGen()) {
-            fprintf(stderr, "Parsed a top-level expression.\n");
+            fprintf(stderr, "Parsed a top level expression.\n");
             ir->print(llvm::errs());
-            fprintf(stderr, "\n");
+            auto H = theJIT->addModule(std::move(theModules));
+            initializeModuleAndFPM();
+
+            auto exprSymbol = theJIT->findSymbol("__anon_expr");
+            assert(exprSymbol && "Function not found!");
+
+            double (*FP)() = (double (*)())(intptr_t)cantFail(exprSymbol.getAddress());
+            fprintf(stderr, "Evaluated to %f\n", FP());
+
+            theJIT->removeModule(H);
         }
-    }
-    else getNextToken();
+    } else getNextToken();
+}
+
+//===--------------------------------------------------------------------------
+// Optimizer and JIT
+//===--------------------------------------------------------------------------
+void initializeModuleAndFPM(){
+    theModules = llvm::make_unique<llvm::Module>("Seanforfun", llvmContext);
+    theModules->setDataLayout(theJIT->getTargetMachine().createDataLayout());
+
+    theFPM = llvm::make_unique<llvm::legacy::FunctionPassManager>(theModules.get());
+
+    //InstructionCombining - Combine instructions to form fewer, simple instructions.
+    theFPM->add(llvm::createInstructionCombiningPass());
+
+    //Reassociate - This pass reassociates commutative expressions in an order that
+    //is designed to promote better constant propagation
+    //For example:  4 + (x + 5)  ->  x + (4 + 5)
+    theFPM->add(llvm::createReassociatePass());
+
+    //Create a legacy GVN pass. This also allows parameterizing whether or not loads are eliminated by the pass.
+    theFPM->add(llvm::createGVNPass());
+
+    //CFGSimplification - Merge basic blocks, eliminate unreachable blocks,
+    // simplify terminator instructions, convert switches to lookup tables, etc.
+    theFPM->add(llvm::createCFGSimplificationPass());
+
+    theFPM->doInitialization();
 }
 
 //===--------------------------------------------------------------------------
 // Code Generator
 //===--------------------------------------------------------------------------
+
+llvm::Function* getFunction(const std::string & name){
+    if(auto f = theModules->getFunction(name)) return f;
+
+    auto f = functionProto.find(name);
+    return f == functionProto.end() ? nullptr : f->second->codeGen();
+}
 
 llvm::Value* NumberExprAST::codeGen() {
     return llvm::ConstantFP::get(llvmContext, llvm::APFloat(val));
@@ -435,7 +490,7 @@ llvm::Value *BinaryExprAST::codeGen() {
 
 llvm::Value* CallExprAST::codeGen(){
     //1. Check if function exist
-    llvm::Function* function = theModules->getFunction(callee);
+    llvm::Function* function = getFunction(callee);
     if(!function) return logErrorV("No function" + callee + "!");
 
     //2. Check if number of args matches
@@ -471,11 +526,10 @@ llvm::Function *ProtoTypeAST::codeGen() {
 }
 
 llvm::Function *FunctionAST::codeGen() {
-    // 1. Create Prototype
-    llvm::Function* function = theModules->getFunction(prototype->getName());
-    if(!function){
-        function = prototype->codeGen();
-    }
+    // 1. Create or getPrototype
+    auto & p = *prototype;
+    functionProto[prototype->getName()] = std::move(prototype);
+    llvm::Function* function = getFunction(p.getName());
     if(!function) return nullptr;
     // Check if current function already has body.
     if(!function->empty()) return (llvm::Function*)logErrorV("Redefine function!");
@@ -492,6 +546,9 @@ llvm::Function *FunctionAST::codeGen() {
     if(llvm::Value* ret = body->codeGen()){
         builder.CreateRet(ret);
         llvm::verifyFunction(*function);
+
+        // Apply optimization.
+        theFPM->run(*function);
         return function;
     }
 
@@ -521,12 +578,19 @@ static void MainLoop(){
 }
 
 int main(){
+    llvm::InitializeNativeTarget();
+    llvm::InitializeNativeTargetAsmPrinter();
+    llvm::InitializeNativeTargetAsmParser();
+
     binopPrecedence['<'] = 10;
     binopPrecedence['+'] = 20;
     binopPrecedence['-'] = 20;
     binopPrecedence['*'] = 40;
     std::cout << "Start> " << std::endl;
-    theModules = llvm::make_unique<llvm::Module>("Seanforfun", llvmContext);
+
+    theJIT = llvm::make_unique<llvm::orc::KaleidoscopeJIT>();
+
+    initializeModuleAndFPM();
     MainLoop();
     theModules->print(llvm::errs(), nullptr);
     return 0;

@@ -272,7 +272,7 @@ static std::unique_ptr<ExprAST> parseBinaryOpExpressionRHS(int opPrec, std::uniq
         int nextPrec = getTokenPrecedence();
         if(curPrec < nextPrec){
             RHS = parseBinaryOpExpressionRHS(curPrec + 1, std::move(RHS));
-            if(RHS) return nullptr;
+            if(!RHS) return nullptr;
         }
 
         LHS = llvm::make_unique<BinaryExprAST>(curOp, std::move(LHS), std::move(RHS));
