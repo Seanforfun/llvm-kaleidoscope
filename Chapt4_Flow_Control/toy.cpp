@@ -27,9 +27,12 @@
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Analysis/CFGPrinter.h"
 
-void initializeModuleAndFPM();
-
 class ProtoTypeAST;
+class ExprAST;
+
+void initializeModuleAndFPM();
+static std::unique_ptr<ExprAST> parsePrimary();
+
 
 static llvm::LLVMContext llvmContext;
 static llvm::IRBuilder<> builder(llvmContext);
@@ -64,9 +67,14 @@ enum Token{
     TOKEN_NUMBER = -5,
 
     //Flow control
+    // if then else
     TOKEN_IF = -6,
     TOKEN_THEN = -7,
-    TOKEN_ELSE = -8
+    TOKEN_ELSE = -8,
+
+    // for in
+    TOKEN_FOR = -9,
+    TOKEN_IN = -10
 };
 
 static std::string identifierStr;   // if current token is an identifier, this variable holds the name.
@@ -97,6 +105,10 @@ static int getToken(){
             return TOKEN_THEN;
         }else if(identifierStr == "else") {
             return TOKEN_ELSE;
+        }else if(identifierStr == "for"){
+            return TOKEN_FOR;
+        }else if(identifierStr == "in"){
+            return TOKEN_IN;
         }else {
             return TOKEN_IDENTIFIER;
         }
@@ -196,6 +208,22 @@ public:
             ELSE(std::move(ELSE)) {}
 
     llvm::Value* codeGen() override;
+};
+
+class ForExprAST : public ExprAST{
+    std::string value;
+    std::unique_ptr<ExprAST> start, end, step, body;
+
+public:
+    ForExprAST(std::string value, std::unique_ptr<ExprAST> start, std::unique_ptr<ExprAST> end,
+               std::unique_ptr<ExprAST> step, std::unique_ptr<ExprAST> body) :
+               value(std::move(value)),
+               start(std::move(start)),
+               end(std::move(end)),
+               step(std::move(step)),
+               body(std::move(body)) {}
+
+    llvm::Value *codeGen() override;
 };
 
 class ProtoTypeAST{
@@ -325,21 +353,6 @@ static std::unique_ptr<ExprAST> parseIfExpr(){
     return llvm::make_unique<IfExprAST>(std::move(Cond), std::move(Then), std::move(Else));
 }
 
-static std::unique_ptr<ExprAST> parsePrimary(){
-    switch (curToken){
-        case TOKEN_IDENTIFIER:
-            return parseIdentifierExpr();
-        case TOKEN_NUMBER:
-            return parseNumberExpr();
-        case '(':
-            return parsePatheneseExpr();
-        case TOKEN_IF:
-            return parseIfExpr();
-        default:
-            return logError("Unknown token");
-    }
-}
-
 //===----------------------------------------------------
 // binary expression parsing
 //===----------------------------------------------------
@@ -425,6 +438,62 @@ static std::unique_ptr<FunctionAST> parseTopLevel(){
     return nullptr;
 }
 
+static std::unique_ptr<ExprAST> parseFor(){
+    getNextToken(); // eat for
+
+    // parse i = 0, expression.
+    // i
+    if(curToken != TOKEN_IDENTIFIER) return logError("Expect an identifier.");
+    std::string variable = identifierStr;
+    getNextToken();
+    // =
+    if(curToken != '=') return logError("Expect '=' in for loop");
+    getNextToken();
+    // 1 or 1 + 2...
+    auto start = parseExpression();
+    // ,
+    if(curToken != ',') return logError("Expect ',' in for loop");
+    getNextToken();
+
+    // parse i < n,
+    auto end = parseExpression();
+    if(!end) return logError("Expect end condition in for loop");
+
+    // step size is optional.
+    std::unique_ptr<ExprAST> step;
+    if(curToken == ','){
+        getNextToken();
+        step = parseExpression();
+        if(!step) return nullptr;
+    }
+
+    if(curToken != TOKEN_IN) return logError("Expect token in in loop");
+    getNextToken();
+    auto body = parseExpression();
+    return llvm::make_unique<ForExprAST>(std::move(variable), std::move(start), std::move(end), std::move(step), std::move(body));
+}
+
+static std::unique_ptr<ExprAST> parsePrimary(){
+    switch (curToken){
+        case TOKEN_IDENTIFIER:
+            return parseIdentifierExpr();
+        case TOKEN_NUMBER:
+            return parseNumberExpr();
+        case '(':
+            return parsePatheneseExpr();
+        case TOKEN_IF:
+            return parseIfExpr();
+        case TOKEN_FOR:
+            return parseFor();
+        default:
+            return logError("Unknown token");
+    }
+}
+
+
+//===-------------------------------------------------------------
+// Top level handlers
+//===-------------------------------------------------------------
 static void definitionHandler(){
     if(auto pdef = parseDefinition()){
         if(auto* ir = pdef->codeGen()){
@@ -675,6 +744,82 @@ llvm::Value *IfExprAST::codeGen() {
     phiNode->addIncoming(elseValue, elseBlock);
 
     return phiNode;
+}
+
+/**
+ * Function definition
+ *  def printstar(n) for i = 1, i < n, 1.0 in putchard(42);
+   entry:
+      ; initial value = 1.0 (inlined into phi)
+      br label %loop
+
+    loop:       ; preds = %loop, %entry
+      %i = phi double [ 1.000000e+00, %entry ], [ %nextvar, %loop ]
+      ; body
+      %calltmp = call double @putchard(double 4.200000e+01)
+      ; increment
+      %nextvar = fadd double %i, 1.000000e+00
+
+      ; termination test
+      %cmptmp = fcmp ult double %i, %n
+      %booltmp = uitofp i1 %cmptmp to double
+      %loopcond = fcmp one double %booltmp, 0.000000e+00
+      br i1 %loopcond, label %loop, label %afterloop
+
+    afterloop:      ; preds = %loop
+      ; loop always returns 0.0
+      ret double 0.000000e+00
+    }
+ * @return Value
+ */
+llvm::Value *ForExprAST::codeGen() {
+    llvm::Function* function = builder.GetInsertBlock()->getParent();
+
+    llvm::Value* startVal = start->codeGen();
+    auto entryBB = builder.GetInsertBlock();
+    auto checkBB = llvm::BasicBlock::Create(llvmContext, "check");
+    auto bodyBB = llvm::BasicBlock::Create(llvmContext, "body");
+    auto afterLoopBB = llvm::BasicBlock::Create(llvmContext, "after_loop");
+    function->getBasicBlockList().push_back(checkBB);
+    function->getBasicBlockList().push_back(bodyBB);
+    function->getBasicBlockList().push_back(afterLoopBB);
+
+    builder.SetInsertPoint(entryBB);
+    builder.CreateBr(checkBB);
+
+    builder.SetInsertPoint(checkBB);
+    llvm::PHINode* Variable = builder.CreatePHI(llvm::Type::getDoubleTy(llvmContext), 2, value);
+    Variable->addIncoming(startVal, entryBB);
+
+    llvm::Value* oldVal = nameValueTbl[value];
+    nameValueTbl[value] = Variable;
+
+    // compare
+    llvm::Value* stepVal;
+    if(step){  // use step
+        stepVal = step->codeGen();
+        if(!stepVal) return nullptr;
+    }else{
+        stepVal = llvm::ConstantFP::get(llvm::Type::getDoubleTy(llvmContext), 0.0);
+    }
+    llvm::Value* nextVal = builder.CreateFAdd(Variable, stepVal);
+    Variable->addIncoming(nextVal, bodyBB);
+
+    auto EndVal = end->codeGen();
+    EndVal = builder.CreateFCmpONE(EndVal, llvm::ConstantFP::get(llvmContext, llvm::APFloat(0.0)), "ifcond");
+    builder.CreateCondBr(EndVal, afterLoopBB, bodyBB);
+
+    // task
+    builder.SetInsertPoint(bodyBB);
+    if(!(body->codeGen())) return nullptr;
+    builder.CreateBr(checkBB);
+
+    // end
+    builder.SetInsertPoint(afterLoopBB);
+    if(oldVal)
+        nameValueTbl[value] = oldVal;
+    else nameValueTbl.erase(value);
+    return llvm::ConstantFP::get(llvmContext, llvm::APFloat(1.0));
 }
 
 static void MainLoop(){

@@ -96,7 +96,97 @@ Please read with [code](https://github.com/Seanforfun/llvm-kaleidoscope/blob/mas
     ```
 
 6. Result
+
     ![Imgur](https://i.imgur.com/AVrvScR.png)
+
+### For control
+1. Syntax for for flow control
+    ```
+    def foo() for i=0, i<10 in sin(i); # default step size is 1.
+    def foo() for i=0, i<10, 1.0 in sin(i);
+    ```
+    
+2. Abstract Syntax Tree for for loop.
+    ```objectivec
+    class ForExprAST : public ExprAST{
+        std::string value; // internal flow control variable
+        std::unique_ptr<ExprAST> start, end, step, body;
+    
+    public:
+        ForExprAST(std::string value, std::unique_ptr<ExprAST> start, std::unique_ptr<ExprAST> end,
+                   std::unique_ptr<ExprAST> step, std::unique_ptr<ExprAST> body) :
+                   value(std::move(value)),
+                   start(std::move(start)),
+                   end(std::move(end)),
+                   step(std::move(step)),
+                   body(std::move(body)) {}
+    
+        llvm::Value *codeGen() override;
+    };
+    ```
+
+3. for-loop step
+    * Step 1: initialize variable.
+    * Step 2: check condition, if true, continue else break.
+    * Step 3: service.
+    * Step 4: add variable and step, go back to Step 2.
+
+4. IR Code
+    
+    ![Imgur](https://i.imgur.com/zkyye6j.png)
+
+5. IR Generator
+    ```objectivec
+    llvm::Value *ForExprAST::codeGen() {
+        llvm::Function* function = builder.GetInsertBlock()->getParent();
+    
+        llvm::Value* startVal = start->codeGen();
+        auto entryBB = builder.GetInsertBlock();
+        auto checkBB = llvm::BasicBlock::Create(llvmContext, "check");
+        auto bodyBB = llvm::BasicBlock::Create(llvmContext, "body");
+        auto afterLoopBB = llvm::BasicBlock::Create(llvmContext, "after_loop");
+        function->getBasicBlockList().push_back(checkBB);
+        function->getBasicBlockList().push_back(bodyBB);
+        function->getBasicBlockList().push_back(afterLoopBB);
+    
+        builder.SetInsertPoint(entryBB);
+        builder.CreateBr(checkBB);
+    
+        builder.SetInsertPoint(checkBB);
+        llvm::PHINode* Variable = builder.CreatePHI(llvm::Type::getDoubleTy(llvmContext), 2, value);
+        Variable->addIncoming(startVal, entryBB);
+    
+        llvm::Value* oldVal = nameValueTbl[value];
+        nameValueTbl[value] = Variable;
+    
+        // compare
+        llvm::Value* stepVal;
+        if(step){  // use step
+            stepVal = step->codeGen();
+            if(!stepVal) return nullptr;
+        }else{
+            stepVal = llvm::ConstantFP::get(llvm::Type::getDoubleTy(llvmContext), 0.0);
+        }
+        llvm::Value* nextVal = builder.CreateFAdd(Variable, stepVal);
+        Variable->addIncoming(nextVal, bodyBB);
+    
+        auto EndVal = end->codeGen();
+        EndVal = builder.CreateFCmpONE(EndVal, llvm::ConstantFP::get(llvmContext, llvm::APFloat(0.0)), "ifcond");
+        builder.CreateCondBr(EndVal, afterLoopBB, bodyBB);
+    
+        // task
+        builder.SetInsertPoint(bodyBB);
+        if(!(body->codeGen())) return nullptr;
+        builder.CreateBr(checkBB);
+    
+        // end
+        builder.SetInsertPoint(afterLoopBB);
+        if(oldVal)
+            nameValueTbl[value] = oldVal;
+        else nameValueTbl.erase(value);
+        return llvm::ConstantFP::get(llvmContext, llvm::APFloat(1.0));
+    }
+    ```
 
 ### Reference
 1. [静态单赋值形式](https://zh.wikipedia.org/wiki/%E9%9D%99%E6%80%81%E5%8D%95%E8%B5%8B%E5%80%BC%E5%BD%A2%E5%BC%8F)
