@@ -80,12 +80,62 @@ Follow the instruction from [Writing an LLVM Pass](https://llvm.org/docs/Writing
         ``` 
 
     * Run hello.bc file with pass
+    
         ![Imgur](https://i.imgur.com/K1jPnyJ.png)
     
     * Get Run time analysis
+    
         ![Imgur](https://i.imgur.com/WtHB4Rb.png) 
     
 ### JIT(Just in time) Compiler
+The code for Kaleidoscope is represented in file [KaleidoscopeJIT.h](https://github.com/Seanforfun/llvm-kaleidoscope/blob/master/include/KaleidoscopeJIT.h).
+
+Learning tutorials for JIT will be offered later. Here I will follow current tutorial and embed the JIT to our compiler.
+
+* Prepare the environment to create code for the current native target and declare and initialize the JIT.
+    ```objectivec
+    //initialize the native target corresponding to the host.
+    llvm::InitializeNativeTarget();
+    //initialize the native target asm printer.
+    llvm::InitializeNativeTargetAsmPrinter();
+    //initialize the native target asm parser
+    llvm::InitializeNativeTargetAsmParser();
+    ```
+
+* Set up the data layout for module, data layout is a class which represents the data format of the code.
+
+    ```objectivec
+    TheModule->setDataLayout(TheJIT->getTargetMachine().createDataLayout());
+    ```
+    
+    ![Imgur](https://i.imgur.com/cSsVmRU.png)
+
+* JIT
+    1. Add module to JIT(save function handler)
+    2. For a function call, it will open a new module for creating the call expression.
+    3. Call Function pointer to call the function.
+    
+    ```objectivec
+    static void topLevelHandler(){
+        if(auto pTop = parseTopLevel()) {
+            if (auto* ir = pTop->codeGen()) {
+                fprintf(stderr, "Parsed a top level expression.\n");
+                ir->print(llvm::errs());
+                auto H = theJIT->addModule(std::move(theModules));
+                initializeModuleAndFPM();
+    
+                auto exprSymbol = theJIT->findSymbol("__anon_expr");
+                assert(exprSymbol && "Function not found!");
+    
+                double (*FP)() = (double (*)())(intptr_t)cantFail(exprSymbol.getAddress());
+                fprintf(stderr, "Evaluated to %f\n", FP());
+    
+                theJIT->removeModule(H);
+            }
+        } else getNextToken();
+    }
+    ```
+    
 
 ### Reference
 1. [Writing an LLVM Pass](https://llvm.org/docs/WritingAnLLVMPass.html)
