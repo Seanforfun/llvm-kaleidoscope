@@ -11,7 +11,7 @@
 #include <cstdlib>
 
 
-#include "../include/KaleidoscopeJIT.h"
+#include "include/KaleidoscopeJIT.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/Value.h"
 #include "llvm/IR/IRBuilder.h"
@@ -25,10 +25,15 @@
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Scalar/GVN.h"
 #include "llvm/Support/TargetSelect.h"
-
-void initializeModuleAndFPM();
+#include "llvm/Analysis/CFGPrinter.h"
 
 class ProtoTypeAST;
+class ExprAST;
+
+void initializeModuleAndFPM();
+static std::unique_ptr<ExprAST> parsePrimary();
+static std::unique_ptr<ExprAST> parseUnary();
+
 
 static llvm::LLVMContext llvmContext;
 static llvm::IRBuilder<> builder(llvmContext);
@@ -37,6 +42,24 @@ static std::map<std::string, llvm::Value*> nameValueTbl;
 static std::unique_ptr<llvm::legacy::FunctionPassManager> theFPM;
 static std::unique_ptr<llvm::orc::KaleidoscopeJIT> theJIT;
 static std::map<std::string, std::unique_ptr<ProtoTypeAST>> functionProto;
+
+#ifdef _WIN32
+#define DLLEXPORT __declspec(dllexport)
+#else
+#define DLLEXPORT
+#endif
+
+/// putchard - putchar that takes a double and returns 0.
+extern "C" DLLEXPORT double putchard(double X) {
+    fputc((char)X, stderr);
+    return 0;
+}
+
+/// printd - printf that takes a double prints it as "%f\n", returning 0.
+extern "C" DLLEXPORT double printd(double X) {
+    fprintf(stderr, "%f\n", X);
+    return 0;
+}
 
 class LexerParseException: public std::exception{
 private:
@@ -55,12 +78,26 @@ enum Token{
     TOKEN_EOF = -1,
 
     // commands
-            TOKEN_DEF = -2,
+    TOKEN_DEF = -2,
     TOKEN_EXT = -3,
 
     //PRIMARY
-            TOKEN_IDENTIFIER = -4,
-    TOKEN_NUMBER = -5
+    TOKEN_IDENTIFIER = -4,
+    TOKEN_NUMBER = -5,
+
+    //Flow control
+    // if then else
+    TOKEN_IF = -6,
+    TOKEN_THEN = -7,
+    TOKEN_ELSE = -8,
+
+    // for in
+    TOKEN_FOR = -9,
+    TOKEN_IN = -10,
+
+    // user defined operator
+    TOKEN_UNARY = -11,
+    TOKEN_BINARY = -12
 };
 
 static std::string identifierStr;   // if current token is an identifier, this variable holds the name.
@@ -81,9 +118,27 @@ static int getToken(){
         while(isalpha((lastCharacter = getchar()))){
             identifierStr += lastCharacter;
         }
-        if(identifierStr == "def") return TOKEN_DEF;
-        else if(identifierStr == "extern") return TOKEN_EXT;
-        return TOKEN_IDENTIFIER;
+        if(identifierStr == "def") {
+            return TOKEN_DEF;
+        }else if(identifierStr == "extern") {
+            return TOKEN_EXT;
+        }else if(identifierStr == "if") {
+            return TOKEN_IF;
+        }else if(identifierStr == "then") {
+            return TOKEN_THEN;
+        }else if(identifierStr == "else") {
+            return TOKEN_ELSE;
+        }else if(identifierStr == "for"){
+            return TOKEN_FOR;
+        }else if(identifierStr == "in"){
+            return TOKEN_IN;
+        }else if(identifierStr == "unary") {
+            return TOKEN_UNARY;
+        }else if(identifierStr == "binary") {
+            return TOKEN_BINARY;
+        }else {
+            return TOKEN_IDENTIFIER;
+        }
     }
 
     if(isdigit(lastCharacter) || lastCharacter == '.'){
@@ -170,19 +225,83 @@ public:
     llvm::Value* codeGen()override;
 };
 
+class IfExprAST: public ExprAST{
+    std::unique_ptr<ExprAST> COND, THEN, ELSE;
+public:
+    IfExprAST(std::unique_ptr<ExprAST> COND,
+            std::unique_ptr<ExprAST> THEN,
+            std::unique_ptr<ExprAST> ELSE): COND(std::move(COND)),
+            THEN(std::move(THEN)),
+            ELSE(std::move(ELSE)) {}
+
+    llvm::Value* codeGen() override;
+};
+
+class ForExprAST : public ExprAST{
+    std::string value;
+    std::unique_ptr<ExprAST> start, end, step, body;
+
+public:
+    ForExprAST(std::string value, std::unique_ptr<ExprAST> start, std::unique_ptr<ExprAST> end,
+               std::unique_ptr<ExprAST> step, std::unique_ptr<ExprAST> body) :
+               value(std::move(value)),
+               start(std::move(start)),
+               end(std::move(end)),
+               step(std::move(step)),
+               body(std::move(body)) {}
+
+    llvm::Value *codeGen() override;
+};
+
+class UnaryAST: public ExprAST{
+private:
+    char Opcode;
+    std::unique_ptr<ExprAST> Operand;
+
+public:
+    UnaryAST(char opcode, std::unique_ptr<ExprAST> operand) :
+    Opcode(opcode),
+    Operand(std::move(operand)) {}
+
+    llvm::Value *codeGen() override;
+};
+
 class ProtoTypeAST{
 private:
     std::string name;
     std::vector<std::string> args;
+    bool IsOperator;
+    unsigned precedence;
 
 public:
     ProtoTypeAST(std::string name,
-                 std::vector<std::string> args) : name(std::move(name)), args(std::move(args)) {}
+                 std::vector<std::string> args,
+                 bool IsOperator = false,
+                 unsigned precedence = 0) : name(std::move(name)),
+                 args(std::move(args)),
+                      IsOperator(IsOperator),
+                      precedence(precedence) {}
 
     llvm::Function* codeGen();
 
     const std::string& getName() const {
         return name;
+    }
+
+    const bool isUnary() const {
+        return IsOperator && args.size() == 1;
+    }
+
+    const bool isBinary() const {
+        return IsOperator && args.size() == 2;
+    }
+
+    const char getOperator() const{
+        return name[name.size() - 1];
+    };
+
+    unsigned int getPrecedence() const {
+        return precedence;
     }
 };
 
@@ -276,17 +395,25 @@ static std::unique_ptr<ExprAST> parseIdentifierExpr(){
     return llvm::make_unique<CallExprAST>(idName, std::move(args));
 }
 
-static std::unique_ptr<ExprAST> parsePrimary(){
-    switch (curToken){
-        case TOKEN_IDENTIFIER:
-            return parseIdentifierExpr();
-        case TOKEN_NUMBER:
-            return parseNumberExpr();
-        case '(':
-            return parsePatheneseExpr();
-        default:
-            return logError("Unknown token");
-    }
+static std::unique_ptr<ExprAST> parseIfExpr(){
+    getNextToken(); // eat if
+
+    auto Cond = parseExpression();
+    if(!Cond) return nullptr;
+
+    if(curToken != TOKEN_THEN) return logError("Expect then expression");
+    getNextToken(); // eat then
+
+    auto Then = parseExpression();
+    if(!Then) return nullptr;
+
+    if(curToken != TOKEN_ELSE) return logError("Expect else expression");
+    getNextToken();
+
+    auto Else = parseExpression();
+    if(!Else) return nullptr;
+
+    return llvm::make_unique<IfExprAST>(std::move(Cond), std::move(Then), std::move(Else));
 }
 
 //===----------------------------------------------------
@@ -299,7 +426,7 @@ static std::unique_ptr<ExprAST> parseBinaryOpExpressionRHS(int, std::unique_ptr<
  * @return
  */
 static std::unique_ptr<ExprAST> parseExpression(){
-    std::unique_ptr<ExprAST> LHS = parsePrimary();
+    std::unique_ptr<ExprAST> LHS = parseUnary();
     if(!LHS) return nullptr;
 
     return parseBinaryOpExpressionRHS(0, std::move(LHS));
@@ -320,7 +447,7 @@ static std::unique_ptr<ExprAST> parseBinaryOpExpressionRHS(int opPrec, std::uniq
         int curOp = curToken;
         getNextToken(); // skip current operator.
 
-        std::unique_ptr<ExprAST> RHS = parsePrimary();
+        std::unique_ptr<ExprAST> RHS = parseUnary();
         if(!RHS) return nullptr;
 
         int nextPrec = getTokenPrecedence();
@@ -334,9 +461,36 @@ static std::unique_ptr<ExprAST> parseBinaryOpExpressionRHS(int opPrec, std::uniq
 }
 
 static std::unique_ptr<ProtoTypeAST> parsePrototype(){
-    if(curToken != TOKEN_IDENTIFIER) return logErrorP("Expect a function name in prototype");
     std::string functionName = identifierStr;
-    getNextToken();
+    unsigned kind = 0; // 0: function 1: unary 2:binary
+    unsigned precedence;
+
+    switch (curToken){
+        case TOKEN_IDENTIFIER:
+            getNextToken();
+            break;
+        case TOKEN_UNARY:
+            getNextToken();
+            if(!isascii(curToken)) return logErrorP("Operator incorrect!");
+            functionName += (char)curToken;
+            kind = 1;
+            getNextToken();
+            break;
+        case TOKEN_BINARY:
+            getNextToken();
+            if(!isascii(curToken)) return logErrorP("Operator incorrect!");
+            functionName += (char)curToken;
+            kind = 2;
+            getNextToken();
+            if(curToken == TOKEN_NUMBER){
+                if(numVal < 1 || numVal > 100) return logErrorP("Precedence must between 1 and 100!");
+                precedence = (unsigned)numVal;
+                getNextToken();
+            }
+            break;
+        default:
+            return logErrorP("Must provide an function name");
+    }
 
     if(curToken != '(') return logErrorP("Expect '(' in prototype");
     std::vector<std::string> args;
@@ -346,8 +500,9 @@ static std::unique_ptr<ProtoTypeAST> parsePrototype(){
         cur = getNextToken();
     }
     if(curToken != ')') return logErrorP("Expect ')' matching '('");
+    if(kind != args.size()) return logErrorP("Variable number do not match function name!");
     getNextToken();
-    return llvm::make_unique<ProtoTypeAST>(functionName, std::move(args));
+    return llvm::make_unique<ProtoTypeAST>(functionName, std::move(args), kind != 0, precedence);
 }
 
 static std::unique_ptr<FunctionAST> parseDefinition(){
@@ -374,6 +529,74 @@ static std::unique_ptr<FunctionAST> parseTopLevel(){
     return nullptr;
 }
 
+static std::unique_ptr<ExprAST> parseFor(){
+    getNextToken(); // eat for
+
+    // parse i = 0, expression.
+    // i
+    if(curToken != TOKEN_IDENTIFIER) return logError("Expect an identifier.");
+    std::string variable = identifierStr;
+    getNextToken();
+    // =
+    if(curToken != '=') return logError("Expect '=' in for loop");
+    getNextToken();
+    // 1 or 1 + 2...
+    auto start = parseExpression();
+    // ,
+    if(curToken != ',') return logError("Expect ',' in for loop");
+    getNextToken();
+
+    // parse i < n,
+    auto end = parseExpression();
+    if(!end) return logError("Expect end condition in for loop");
+
+    // step size is optional.
+    std::unique_ptr<ExprAST> step;
+    if(curToken == ','){
+        getNextToken();
+        step = parseExpression();
+        if(!step) return nullptr;
+    }
+
+    if(curToken != TOKEN_IN) return logError("Expect token in in loop");
+    getNextToken();
+    auto body = parseExpression();
+    return llvm::make_unique<ForExprAST>(std::move(variable), std::move(start), std::move(end), std::move(step), std::move(body));
+}
+
+static std::unique_ptr<ExprAST> parseUnary(){
+    if(!isascii(curToken) || curToken == '(' || curToken == ')')
+        return parsePrimary();
+
+    char Op = (char)curToken;
+    getNextToken();
+    if(auto Operand = parseUnary()){
+        return llvm::make_unique<UnaryAST>(Op, std::move(Operand));
+    }
+    return nullptr;
+}
+
+static std::unique_ptr<ExprAST> parsePrimary(){
+    switch (curToken){
+        case TOKEN_IDENTIFIER:
+            return parseIdentifierExpr();
+        case TOKEN_NUMBER:
+            return parseNumberExpr();
+        case '(':
+            return parsePatheneseExpr();
+        case TOKEN_IF:
+            return parseIfExpr();
+        case TOKEN_FOR:
+            return parseFor();
+        default:
+            return logError("Unknown token");
+    }
+}
+
+
+//===-------------------------------------------------------------
+// Top level handlers
+//===-------------------------------------------------------------
 static void definitionHandler(){
     if(auto pdef = parseDefinition()){
         if(auto* ir = pdef->codeGen()){
@@ -410,7 +633,7 @@ static void topLevelHandler(){
             auto exprSymbol = theJIT->findSymbol("__anon_expr");
             assert(exprSymbol && "Function not found!");
 
-            double (*FP)() = (double (*)())(intptr_t)cantFail(exprSymbol.getAddress());
+            double (*FP)() = (double (*)())(intptr_t(cantFail(exprSymbol.getAddress())));
             fprintf(stderr, "Evaluated to %f\n", FP());
 
             theJIT->removeModule(H);
@@ -476,6 +699,9 @@ llvm::Value *BinaryExprAST::codeGen() {
         case '<':
             l = builder.CreateFCmpULT(l, r, "tmpCmp");
             return builder.CreateUIToFP(l, llvm::Type::getDoubleTy(llvmContext), "tmpBool");
+        case '>':
+            l = builder.CreateFCmpUGT(l, r, "tmpCmp");
+            return builder.CreateUIToFP(l, llvm::Type::getDoubleTy(llvmContext), "tmpBool");
         case '+':
             return builder.CreateFAdd(l, r, "tmpAdd");
         case '-':
@@ -483,9 +709,17 @@ llvm::Value *BinaryExprAST::codeGen() {
         case '*':
             return builder.CreateFMul(l, r, "tmpMul");
         default:
-            logErrorV("Invalid Operator!");
+            break;
     }
-    return nullptr;
+
+    auto F = getFunction(std::string("binary") + Op);
+    assert(!F && "Cannot find the binary operation function!");
+
+    llvm::FunctionCallee callee(F);
+
+    llvm::Value* value[2] = {l, r};
+    llvm::ArrayRef<llvm::Value*> array(value, 2);
+    return builder.CreateCall(callee, array, "binaryOp");
 }
 
 llvm::Value* CallExprAST::codeGen(){
@@ -531,6 +765,9 @@ llvm::Function *FunctionAST::codeGen() {
     functionProto[prototype->getName()] = std::move(prototype);
     llvm::Function* function = getFunction(p.getName());
     if(!function) return nullptr;
+    if(p.isBinary())
+        binopPrecedence[p.getOperator()] = p.getPrecedence();
+
     // Check if current function already has body.
     if(!function->empty()) return (llvm::Function*)logErrorV("Redefine function!");
 
@@ -554,6 +791,159 @@ llvm::Function *FunctionAST::codeGen() {
 
     function->eraseFromParent();
     return nullptr;
+}
+
+
+//define double @baz(double %x) {
+//entry:
+//%ifcond = fcmp one double %x, 0.000000e+00
+//br i1 %ifcond, label %then, label %else
+//
+//then:       ; preds = %entry
+//%calltmp = call double @foo()
+//br label %ifcont
+//
+//else:       ; preds = %entry
+//%calltmp1 = call double @bar()
+//br label %ifcont
+//
+//ifcont:     ; preds = %else, %then
+//%iftmp = phi double [ %calltmp, %then ], [ %calltmp1, %else ]
+//ret double %iftmp
+//}
+llvm::Value *IfExprAST::codeGen() {
+    //%ifcond = fcmp one double %x, 0.000000e+00
+    llvm::Value* CondV = COND->codeGen();
+    if(!CondV) return nullptr;
+
+    CondV = builder.CreateFCmpONE(CondV, llvm::ConstantFP::get(llvmContext, llvm::APFloat(0.0)), "ifcond");
+
+    llvm::Function* function = builder.GetInsertBlock()->getParent();
+    llvm::BasicBlock* thenBlock = llvm::BasicBlock::Create(llvmContext, "then");
+    llvm::BasicBlock* elseBlock = llvm::BasicBlock::Create(llvmContext, "else");
+    llvm::BasicBlock* mergeBlock = llvm::BasicBlock::Create(llvmContext, "ifcont");
+
+    // 1. Condition check and branch
+    // br i1 %ifcond, label %then, label %else
+    builder.CreateCondBr(CondV, thenBlock, elseBlock);
+
+    // emit then block
+    function->getBasicBlockList().push_back(thenBlock);
+    builder.SetInsertPoint(thenBlock);
+    // %calltmp = call double @foo()
+    llvm::Value* thenVal = THEN->codeGen();
+    if(!thenVal) return nullptr;
+    // br label %ifcont
+    builder.CreateBr(mergeBlock);
+    thenBlock = builder.GetInsertBlock();
+
+    //2. emit then block
+    function->getBasicBlockList().push_back(elseBlock);
+    builder.SetInsertPoint(elseBlock);
+    llvm::Value* elseValue = ELSE->codeGen();
+    if(!elseValue) return nullptr;
+    // br label %ifcont
+    builder.CreateBr(mergeBlock);
+
+    elseBlock = builder.GetInsertBlock();
+
+    //3. emit the merge block
+    function->getBasicBlockList().push_back(mergeBlock);
+    builder.SetInsertPoint(mergeBlock);
+
+    // Create Ф node in SSA graph(static single assignment graph)
+    llvm::PHINode* phiNode = builder.CreatePHI(llvm::Type::getDoubleTy(llvmContext), 2, "tmpIf");
+
+    phiNode->addIncoming(thenVal, thenBlock);
+    phiNode->addIncoming(elseValue, elseBlock);
+
+    return phiNode;
+}
+
+/**
+ * Function definition
+ *  def printstar(n) for i = 1, i < n, 1.0 in putchard(42);
+   entry:
+      ; initial value = 1.0 (inlined into phi)
+      br label %loop
+
+    loop:       ; preds = %loop, %entry
+      %i = phi double [ 1.000000e+00, %entry ], [ %nextvar, %loop ]
+      ; body
+      %calltmp = call double @putchard(double 4.200000e+01)
+      ; increment
+      %nextvar = fadd double %i, 1.000000e+00
+
+      ; termination test
+      %cmptmp = fcmp ult double %i, %n
+      %booltmp = uitofp i1 %cmptmp to double
+      %loopcond = fcmp one double %booltmp, 0.000000e+00
+      br i1 %loopcond, label %loop, label %afterloop
+
+    afterloop:      ; preds = %loop
+      ; loop always returns 0.0
+      ret double 0.000000e+00
+    }
+ * @return Value
+ */
+llvm::Value *ForExprAST::codeGen() {
+    llvm::Function* function = builder.GetInsertBlock()->getParent();
+
+    llvm::Value* startVal = start->codeGen();
+    auto entryBB = builder.GetInsertBlock();
+    auto checkBB = llvm::BasicBlock::Create(llvmContext, "check");
+    auto bodyBB = llvm::BasicBlock::Create(llvmContext, "body");
+    auto afterLoopBB = llvm::BasicBlock::Create(llvmContext, "after_loop");
+    function->getBasicBlockList().push_back(checkBB);
+    function->getBasicBlockList().push_back(bodyBB);
+    function->getBasicBlockList().push_back(afterLoopBB);
+
+    builder.SetInsertPoint(entryBB);
+    builder.CreateBr(checkBB);
+
+    builder.SetInsertPoint(checkBB);
+    llvm::PHINode* Variable = builder.CreatePHI(llvm::Type::getDoubleTy(llvmContext), 2, value);
+    Variable->addIncoming(startVal, entryBB);
+
+    llvm::Value* oldVal = nameValueTbl[value];
+    nameValueTbl[value] = Variable;
+
+    // compare
+    llvm::Value* stepVal;
+    if(step){  // use step
+        stepVal = step->codeGen();
+        if(!stepVal) return nullptr;
+    }else{
+        stepVal = llvm::ConstantFP::get(llvm::Type::getDoubleTy(llvmContext), 0.0);
+    }
+    llvm::Value* nextVal = builder.CreateFAdd(Variable, stepVal);
+    Variable->addIncoming(nextVal, bodyBB);
+
+    auto EndVal = end->codeGen();
+    EndVal = builder.CreateFCmpONE(EndVal, llvm::ConstantFP::get(llvmContext, llvm::APFloat(0.0)), "ifcond");
+    builder.CreateCondBr(EndVal, afterLoopBB, bodyBB);
+
+    // task
+    builder.SetInsertPoint(bodyBB);
+    if(!(body->codeGen())) return nullptr;
+    builder.CreateBr(checkBB);
+
+    // end
+    builder.SetInsertPoint(afterLoopBB);
+    if(oldVal)
+        nameValueTbl[value] = oldVal;
+    else nameValueTbl.erase(value);
+    return llvm::ConstantFP::get(llvmContext, llvm::APFloat(1.0));
+}
+
+llvm::Value *UnaryAST::codeGen() {
+    auto oprand = Operand->codeGen();
+    if(!oprand) return nullptr;
+
+    auto function = getFunction(std::string("unary") + Opcode);
+    if(!function) return nullptr;
+    llvm::FunctionCallee callee(function);
+    return builder.CreateCall(callee, oprand, "unop");
 }
 
 static void MainLoop(){
@@ -583,6 +973,7 @@ int main(){
     llvm::InitializeNativeTargetAsmParser();
 
     binopPrecedence['<'] = 10;
+    binopPrecedence['>'] = 10;
     binopPrecedence['+'] = 20;
     binopPrecedence['-'] = 20;
     binopPrecedence['*'] = 40;

@@ -27,13 +27,12 @@ include_directories(${LLVM_INCLUDE_DIRS})
 #################################################################
 # Now build our tools
 #################################################################
-add_executable(toy toy.cpp ../include/KaleidoscopeJIT.h)
+add_executable(toy toy.cpp include/KaleidoscopeJIT.h)
 
 #################################################################
 # Set Flags
 #################################################################
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -fno-rtti")
-set(LLVM_ENABLE_RTTI TRUE)
 
 #################################################################
 # Find the libraries that correspond to the LLVM components
@@ -49,7 +48,6 @@ llvm_map_components_to_libnames(llvm_libs support core irreader ScalarOpts
 #target_link_libraries(toy ${llvm_libs})
 #link_directories(./bin) #添加动态连接库的路径
 #add_library( libhello SHARED IMPORTED )
-target_link_libraries(toy ${llvm_libs})
 
 #################################################################
 # Add Static .a library
