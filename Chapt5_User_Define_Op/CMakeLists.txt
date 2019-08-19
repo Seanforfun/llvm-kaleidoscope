@@ -27,7 +27,7 @@ include_directories(${LLVM_INCLUDE_DIRS})
 #################################################################
 # Now build our tools
 #################################################################
-add_executable(toy toy.cpp include/KaleidoscopeJIT.h)
+add_executable(toy toy.cpp ../include/KaleidoscopeJIT.h)
 
 #################################################################
 # Set Flags
@@ -45,9 +45,9 @@ llvm_map_components_to_libnames(llvm_libs support core irreader ScalarOpts
 #################################################################
 # Add Dynamic .so library
 #################################################################
-#target_link_libraries(toy ${llvm_libs})
 #link_directories(./bin) #添加动态连接库的路径
 #add_library( libhello SHARED IMPORTED )
+target_link_libraries(toy ${llvm_libs})
 
 #################################################################
 # Add Static .a library

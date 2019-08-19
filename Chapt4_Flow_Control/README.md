@@ -9,10 +9,12 @@ Please read with [code](https://github.com/Seanforfun/llvm-kaleidoscope/blob/mas
     def foo(x) if x > 0 then 1 else 0;
     ```
 2. Abstract Syntax Tree for IF control.
+
     ![Imgur](https://i.imgur.com/JJ7xhOs.png)
 
 3. Basic Block structure without optimization
     * Knowledge 1: SSA(static single assignment) form.
+	
         ![Imgur](https://i.imgur.com/ZYwE5PI.png)
     
     * PHI Node: As the result of y3 is not determined in the last block, there is a PHI(Ф) node which select the y3 value according to condition.

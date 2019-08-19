@@ -11,7 +11,7 @@
 #include <cstdlib>
 
 
-#include "include/KaleidoscopeJIT.h"
+#include "../include/KaleidoscopeJIT.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/Value.h"
 #include "llvm/IR/IRBuilder.h"
@@ -500,7 +500,7 @@ static std::unique_ptr<ProtoTypeAST> parsePrototype(){
         cur = getNextToken();
     }
     if(curToken != ')') return logErrorP("Expect ')' matching '('");
-    if(kind != args.size()) return logErrorP("Variable number do not match function name!");
+    if(kind && kind != args.size()) return logErrorP("Variable number do not match function name!");
     getNextToken();
     return llvm::make_unique<ProtoTypeAST>(functionName, std::move(args), kind != 0, precedence);
 }
@@ -713,7 +713,7 @@ llvm::Value *BinaryExprAST::codeGen() {
     }
 
     auto F = getFunction(std::string("binary") + Op);
-    assert(!F && "Cannot find the binary operation function!");
+    assert(F && "Cannot find the binary operation function!");
 
     llvm::FunctionCallee callee(F);
 
